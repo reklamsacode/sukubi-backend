@@ -79,6 +79,14 @@ def handle_checkout_completed(session_data: dict, db: Session):
 
     logger.info(f"User {user_id} upgraded to {plan}")
 
+    # Send payment email
+    try:
+        from app.services.email_service import send_payment_success
+        amount = "$29" if plan == "pro" else "$79"
+        send_payment_success(user.email, plan.capitalize(), amount)
+    except Exception:
+        pass
+
 
 def handle_invoice_paid(invoice: dict, db: Session):
     subscription_id = invoice.get("subscription")

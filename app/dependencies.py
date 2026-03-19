@@ -91,6 +91,13 @@ def get_current_user(
         db.refresh(user)
         logger.info(f"Auto-created user {sub} ({email})")
 
+        # Send welcome email
+        try:
+            from app.services.email_service import send_welcome
+            send_welcome(email, full_name)
+        except Exception as e:
+            logger.warning(f"Welcome email failed: {e}")
+
     return user
 
 
