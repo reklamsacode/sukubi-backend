@@ -1,102 +1,123 @@
 import uuid
 import logging
-import boto3
 import httpx
-from botocore.config import Config as BotoConfig
 
 from app.config import get_settings
 
 logger = logging.getLogger(__name__)
 settings = get_settings()
 
-# Mock mode when R2 is not configured
-_mock_mode = not settings.R2_ENDPOINT
+SUPABASE_STORAGE_URL = f"{settings.SUPABASE_URL}/storage/v1" if settings.SUPABASE_URL else ""
+BUCKET = "uploads"
+_active = bool(settings.SUPABASE_URL and settings.SUPABASE_SERVICE_ROLE_KEY)
 
 
-def get_r2_client():
-    return boto3.client(
-        "s3",
-        endpoint_url=settings.R2_ENDPOINT,
-        aws_access_key_id=settings.R2_ACCESS_KEY,
-        aws_secret_access_key=settings.R2_SECRET_KEY,
-        config=BotoConfig(signature_version="s3v4"),
-        region_name="auto",
-    )
+def _headers():
+    return {
+        "Authorization": f"Bearer {settings.SUPABASE_SERVICE_ROLE_KEY}",
+        "apikey": settings.SUPABASE_SERVICE_ROLE_KEY,
+    }
+
+
+def _ensure_bucket():
+    """Create the storage bucket if it doesn't exist."""
+    if not _active:
+        return
+    try:
+        with httpx.Client(timeout=10) as client:
+            # Check if bucket exists
+            resp = client.get(f"{SUPABASE_STORAGE_URL}/bucket/{BUCKET}", headers=_headers())
+            if resp.status_code == 404:
+                # Create public bucket
+                client.post(
+                    f"{SUPABASE_STORAGE_URL}/bucket",
+                    headers={**_headers(), "Content-Type": "application/json"},
+                    json={"id": BUCKET, "name": BUCKET, "public": True},
+                )
+                logger.info(f"Created Supabase storage bucket: {BUCKET}")
+    except Exception as e:
+        logger.warning(f"Bucket check failed: {e}")
+
+
+# Ensure bucket on import
+_ensure_bucket()
 
 
 def upload_file(file_content: bytes, original_filename: str, content_type: str) -> tuple[str, str]:
-    """Upload file bytes to R2. Returns (s3_key, public_url)."""
+    """Upload file to Supabase Storage. Returns (storage_path, public_url)."""
     ext = original_filename.rsplit(".", 1)[-1] if "." in original_filename else "jpg"
-    key = f"uploads/{uuid.uuid4()}.{ext}"
+    path = f"{uuid.uuid4()}.{ext}"
 
-    if _mock_mode:
-        mock_url = f"https://mock-r2.nescora.dev/{key}"
-        return key, mock_url
+    if not _active:
+        mock_url = f"https://mock-storage.nescora.dev/{BUCKET}/{path}"
+        return path, mock_url
 
-    client = get_r2_client()
-    client.put_object(
-        Bucket=settings.R2_BUCKET,
-        Key=key,
-        Body=file_content,
-        ContentType=content_type,
-    )
+    with httpx.Client(timeout=60) as client:
+        resp = client.post(
+            f"{SUPABASE_STORAGE_URL}/object/{BUCKET}/{path}",
+            headers={**_headers(), "Content-Type": content_type},
+            content=file_content,
+        )
+        resp.raise_for_status()
 
-    public_url = f"{settings.R2_PUBLIC_URL}/{key}"
-    return key, public_url
+    public_url = f"{settings.SUPABASE_URL}/storage/v1/object/public/{BUCKET}/{path}"
+    logger.info(f"Uploaded to Supabase Storage: {path} ({len(file_content)} bytes)")
+    return path, public_url
 
 
 def download_from_url_and_upload(source_url: str, dest_prefix: str = "results") -> tuple[str, str]:
-    """
-    Download an image from an external URL (e.g. Replicate CDN)
-    and re-upload it to R2 for permanent storage.
+    """Download from external URL and re-upload to Supabase Storage."""
+    path = f"{dest_prefix}/{uuid.uuid4()}.jpg"
 
-    Returns (s3_key, public_url).
-    """
-    key = f"{dest_prefix}/{uuid.uuid4()}.jpg"
+    if not _active:
+        mock_url = f"https://mock-storage.nescora.dev/{BUCKET}/{path}"
+        logger.info(f"Mock: would copy {source_url} → {path}")
+        return path, mock_url
 
-    if _mock_mode:
-        mock_url = f"https://mock-r2.nescora.dev/{key}"
-        logger.info(f"Mock: would copy {source_url} → {key}")
-        return key, mock_url
-
-    # Download from source
-    with httpx.Client(timeout=60.0) as client:
+    with httpx.Client(timeout=60) as client:
         resp = client.get(source_url)
         resp.raise_for_status()
         content = resp.content
         content_type = resp.headers.get("content-type", "image/jpeg")
 
-    # Upload to R2
-    r2 = get_r2_client()
-    r2.put_object(
-        Bucket=settings.R2_BUCKET,
-        Key=key,
-        Body=content,
-        ContentType=content_type,
-    )
+    # Upload to Supabase
+    with httpx.Client(timeout=60) as client:
+        resp = client.post(
+            f"{SUPABASE_STORAGE_URL}/object/{BUCKET}/{path}",
+            headers={**_headers(), "Content-Type": content_type},
+            content=content,
+        )
+        resp.raise_for_status()
 
-    public_url = f"{settings.R2_PUBLIC_URL}/{key}"
-    logger.info(f"Copied result to R2: {key} ({len(content)} bytes)")
-    return key, public_url
+    public_url = f"{settings.SUPABASE_URL}/storage/v1/object/public/{BUCKET}/{path}"
+    logger.info(f"Copied to Supabase Storage: {path} ({len(content)} bytes)")
+    return path, public_url
 
 
 def generate_presigned_url(key: str, expires_in: int = 3600) -> str:
-    """Generate a temporary presigned URL for a file."""
-    if _mock_mode:
-        return f"https://mock-r2.nescora.dev/{key}?token=mock-presigned"
+    """Generate a temporary signed URL for a file."""
+    if not _active:
+        return f"https://mock-storage.nescora.dev/{BUCKET}/{key}?token=mock"
 
-    client = get_r2_client()
-    return client.generate_presigned_url(
-        "get_object",
-        Params={"Bucket": settings.R2_BUCKET, "Key": key},
-        ExpiresIn=expires_in,
-    )
+    with httpx.Client(timeout=10) as client:
+        resp = client.post(
+            f"{SUPABASE_STORAGE_URL}/object/sign/{BUCKET}/{key}",
+            headers={**_headers(), "Content-Type": "application/json"},
+            json={"expiresIn": expires_in},
+        )
+        resp.raise_for_status()
+        data = resp.json()
+        return f"{settings.SUPABASE_URL}/storage/v1{data['signedURL']}"
 
 
 def delete_file(key: str) -> None:
-    """Delete a file from R2."""
-    if _mock_mode:
+    """Delete a file from Supabase Storage."""
+    if not _active:
         return
 
-    client = get_r2_client()
-    client.delete_object(Bucket=settings.R2_BUCKET, Key=key)
+    with httpx.Client(timeout=10) as client:
+        client.delete(
+            f"{SUPABASE_STORAGE_URL}/object/{BUCKET}",
+            headers={**_headers(), "Content-Type": "application/json"},
+            json={"prefixes": [key]},
+        )

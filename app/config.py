@@ -14,16 +14,9 @@ class Settings(BaseSettings):
     JWT_ALGORITHM: str = "HS256"
     ACCESS_TOKEN_EXPIRE_MINUTES: int = 30
 
-    # Supabase (for storage + auth verification)
+    # Supabase (DB + Storage + Auth)
     SUPABASE_URL: str = ""
     SUPABASE_SERVICE_ROLE_KEY: str = ""
-
-    # Cloudflare R2 (S3-compatible)
-    R2_ENDPOINT: str = ""
-    R2_ACCESS_KEY: str = ""
-    R2_SECRET_KEY: str = ""
-    R2_BUCKET: str = "nescora-uploads"
-    R2_PUBLIC_URL: str = ""
 
     # Stripe
     STRIPE_SECRET_KEY: str = ""
@@ -36,6 +29,9 @@ class Settings(BaseSettings):
 
     # OpenAI (TTS only)
     OPENAI_API_KEY: str = ""
+
+    # Email (Resend)
+    RESEND_API_KEY: str = ""
 
     # App
     APP_ENV: str = "development"
