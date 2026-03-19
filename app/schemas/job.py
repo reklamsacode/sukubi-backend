@@ -52,6 +52,11 @@ class RemovalJobCreateRequest(BaseModel):
     mask_data: dict
 
 
+class BulkEnhanceRequest(BaseModel):
+    image_ids: list[str]
+    listing_id: str | None = None  # optional: attach results to a listing
+
+
 class JobResponse(BaseModel):
     id: str
     type: str

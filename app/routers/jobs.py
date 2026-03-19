@@ -8,11 +8,77 @@ from app.models.base import get_db
 from app.models.job import Job, JOB_CREDITS
 from app.models.image import Image
 from app.models.user import User
-from app.schemas.job import JobCreateRequest, StagingJobCreateRequest, RemovalJobCreateRequest, VideoJobCreateRequest, VoiceoverJobCreateRequest, JobResponse
+from app.schemas.job import JobCreateRequest, StagingJobCreateRequest, RemovalJobCreateRequest, VideoJobCreateRequest, VoiceoverJobCreateRequest, JobResponse, BulkEnhanceRequest
 from app.dependencies import get_current_user
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/jobs", tags=["jobs"])
+
+
+# ── POST /api/jobs/bulk-enhance ──
+
+@router.post("/bulk-enhance", response_model=list[JobResponse], status_code=201)
+def create_bulk_enhance(
+    body: BulkEnhanceRequest,
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """Enhance all images with one click using admin-configured prompt."""
+    if not body.image_ids:
+        raise HTTPException(status_code=400, detail="At least one image is required")
+
+    if len(body.image_ids) > 40:
+        raise HTTPException(status_code=400, detail="Maximum 40 images per bulk enhance")
+
+    # Verify all images belong to user
+    images = db.query(Image).filter(Image.id.in_(body.image_ids), Image.user_id == user.id).all()
+    if len(images) != len(body.image_ids):
+        raise HTTPException(status_code=400, detail="One or more images not found")
+
+    # Credits: 1 per image
+    total_credits = len(body.image_ids)
+    if not user.can_afford(total_credits):
+        raise HTTPException(status_code=402, detail={
+            "message": "Insufficient credits",
+            "credits_needed": total_credits,
+            "credits_remaining": user.credits_remaining,
+        })
+
+    user.deduct_credits(total_credits)
+
+    # Create one job per image for parallel processing
+    jobs = []
+    for image_id in body.image_ids:
+        job = Job(
+            user_id=user.id,
+            type="enhance",
+            status="pending",
+            input_data={
+                "image_ids": [image_id],
+                "listing_id": body.listing_id,
+                "settings": {"level": 2, "style": "natural", "output_size": "4k"},
+                "use_admin_prompt": True,
+            },
+            credits_used=1,
+        )
+        db.add(job)
+        jobs.append(job)
+
+    db.commit()
+
+    # Start processing each job
+    for job in jobs:
+        db.refresh(job)
+        try:
+            from app.tasks.enhance import process_enhance_job
+            task = process_enhance_job.delay(job.id)
+            job.status = "processing"
+            db.commit()
+        except Exception as e:
+            logger.warning(f"Could not dispatch task for {job.id}: {e}")
+
+    logger.info(f"Bulk enhance: {len(jobs)} jobs for user {user.id}")
+    return jobs
 
 
 # ── POST /api/jobs/enhance ──
